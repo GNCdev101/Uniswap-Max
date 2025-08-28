@@ -1,75 +1,90 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.7;
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.19;
+import "../Positions.sol"; import "../Market.sol"; import "../LiquidityPoolFactory.sol"; import "../LiquidityPool.sol"; import "../PriceFeedL1.sol"; import "@solmate/tokens/ERC20.sol"; import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-contract HelperConfig {
-    NetworkConfig public activeNetworkConfig;
+import "@uniswapCore/contracts/UniswapV3Pool.sol"; import {SwapRouter} from "@uniswapPeriphery/contracts/SwapRouter.sol";
 
-    struct NetworkConfig {
-        address oracle;
-        address priceFeedETHUSD;
-        address priceFeedBTCETH;
-        address priceFeedUSDCETH;
-        address priceFeedDAIETH;
-        address nonfungiblePositionManager;
-        address swapRouter;
-        address liquidityPoolFactoryUniswapV3;
-        uint256 liquidationReward;
-        address addWBTC;
-        address addWETH;
-        address addUSDC;
-        address addDAI;
+import "forge-std/Test.sol"; import "../test/utils/HelperConfig.sol"; import "../test/mocks/MockV3Aggregator.sol"; import {Utils} from "../test/utils/Utils.sol";
+
+contract Deployments is Test, HelperConfig, Utils { UniswapV3Helper public uniswapV3Helper; LiquidityPoolFactory public liquidityPoolFactory; PriceFeedL1 public priceFeedL1; Market public market; Positions public positions; MockV3Aggregator public mockV3AggregatorWBTCETH; MockV3Aggregator public mockV3AggregatorUSDCETH; MockV3Aggregator public mockV3AggregatorETHUSD; LiquidityPool public lbPoolWBTC; LiquidityPool public lbPoolWETH; LiquidityPool public lbPoolUSDC; SwapRouter public swapRouter; address public alice; address public bob; address public carol; address public deployer;
+
+HelperConfig.NetworkConfig public conf;
+
+function setUp() public {}
+
+function run() public {
+    conf = getActiveNetworkConfig();
+
+    address ethUsdPriceFeed;
+    address btcEthPriceFeed;
+    address usdcEthPriceFeed;
+    address daiEthPriceFeed;
+
+    if (block.chainid == 31337) { // Anvil
+        mockV3AggregatorWBTCETH = new MockV3Aggregator(18, 14 ether); // 1 WBTC = 14 ETH
+        mockV3AggregatorUSDCETH = new MockV3Aggregator(18, 1e15); // 1 USDC = 0,0001 ETH
+        mockV3AggregatorETHUSD = new MockV3Aggregator(8, 1000e8); // 1 ETH = 1000 USD
+        // For local testing, we don't have a DAI mock, so we can reuse another one or deploy a new one if needed.
+        // For simplicity, we will not add the DAI pool in local testing for now.
+        ethUsdPriceFeed = address(mockV3AggregatorETHUSD);
+        btcEthPriceFeed = address(mockV3AggregatorWBTCETH);
+        usdcEthPriceFeed = address(mockV3AggregatorUSDCETH);
+    } else {
+        ethUsdPriceFeed = conf.priceFeedETHUSD;
+        btcEthPriceFeed = conf.priceFeedBTCETH;
+        usdcEthPriceFeed = conf.priceFeedUSDCETH;
+        daiEthPriceFeed = conf.priceFeedDAIETH;
     }
 
-    mapping(uint256 => NetworkConfig) public chainIdToNetworkConfig;
+    vm.startBroadcast();
 
-    constructor() {
-        // chainIdToNetworkConfig[11155111] = getSepoliaEthConfig();
-        chainIdToNetworkConfig[1] = getMainnetForkConfig();
-        // chainIdToNetworkConfig[31337] = getAnvilConfig();
+    // mainnet context
+    swapRouter = SwapRouter(payable(conf.swapRouter));
 
-        activeNetworkConfig = chainIdToNetworkConfig[block.chainid];
+    // contracts
+    uniswapV3Helper = new UniswapV3Helper(conf.nonfungiblePositionManager, conf.swapRouter);
+    priceFeedL1 = new PriceFeedL1(ethUsdPriceFeed, conf.addWETH);
+    liquidityPoolFactory = new LiquidityPoolFactory();
+    positions = new Positions(
+        address(priceFeedL1),
+        address(liquidityPoolFactory),
+        conf.liquidityPoolFactoryUniswapV3,
+        conf.nonfungiblePositionManager,
+        address(uniswapV3Helper),
+        conf.liquidationReward
+    );
+    market = new Market(
+        address(positions),
+        address(liquidityPoolFactory),
+        address(priceFeedL1),
+        msg.sender
+    );
+
+    /// configurations
+    // add position addres to the factory
+    liquidityPoolFactory.addPositionsAddress(address(positions));
+
+    // transfer ownership
+    positions.transferOwnership(address(market));
+    liquidityPoolFactory.transferOwnership(address(market));
+    priceFeedL1.transferOwnership(address(market));
+
+    // create liquidity pools
+    lbPoolWBTC = LiquidityPool(market.createLiquidityPool(conf.addWBTC));
+    lbPoolWETH = LiquidityPool(market.createLiquidityPool(conf.addWETH));
+    lbPoolUSDC = LiquidityPool(market.createLiquidityPool(conf.addUSDC));
+
+    // add price feeds
+    market.addPriceFeed(conf.addWBTC, btcEthPriceFeed);
+    market.addPriceFeed(conf.addUSDC, usdcEthPriceFeed);
+    market.addPriceFeed(conf.addWETH, ethUsdPriceFeed);
+
+    if (block.chainid != 31337) {
+         market.createLiquidityPool(conf.addDAI);
+         market.addPriceFeed(conf.addDAI, daiEthPriceFeed);
     }
 
-    function getActiveNetworkConfig() public view returns (NetworkConfig memory) {
-        return activeNetworkConfig;
-    }
+    vm.stopBroadcast();
+}
 
-    // // georli in reality
-    // function getSepoliaEthConfig()
-    //     internal
-    //     pure
-    //     returns (NetworkConfig memory sepoliaNetworkConfig)
-    // {
-    //     sepoliaNetworkConfig = NetworkConfig({
-    //         oracle: 0x6090149792dAAeE9D1D568c9f9a6F6B46AA29eFD,
-    //         priceFeedETHUSD: 0x694AA1769357215DE4FAC081bf1f309aDC325306, // ETH / USD
-    //         priceFeedBTCETH: 0x5fb1616F78dA7aFC9FF79e0371741a747D2a7F22,
-    //         nonfungiblePositionManager: 0xC36442b4a4522E871399CD717aBDD847Ab11FE88,
-    //         swapRouter: 0xE592427A0AEce92De3Edee1F18E0157C05861564,
-    //         liquidityPoolFactoryUniswapV3: 0x1F98431c8aD98523631AE4a59f267346ea31F984,
-    //         liquidationReward: 10
-    //     });
-    // }
-
-    function getMainnetForkConfig()
-        internal
-        pure
-        returns (NetworkConfig memory mainnetNetworkConfig)
-    {
-        mainnetNetworkConfig = NetworkConfig({
-            oracle: address(0), // This is a mock
-            priceFeedETHUSD: address(0), // This is a mock
-            priceFeedBTCETH: address(0),
-            priceFeedUSDCETH: address(0),
-            priceFeedDAIETH: address(0),
-            nonfungiblePositionManager: 0xC36442b4a4522E871399CD717aBDD847Ab11FE88,
-            swapRouter: 0xE592427A0AEce92De3Edee1F18E0157C05861564,
-            liquidityPoolFactoryUniswapV3: 0x1F98431c8aD98523631AE4a59f267346ea31F984,
-            liquidationReward: 10,
-            addWBTC: 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599,
-            addWETH: 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2,
-            addUSDC: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,
-            addDAI: 0x6B175474E89094C44Da98b954EedeAC495271d0F
-        });
-    }
 }
